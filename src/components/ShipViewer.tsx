@@ -4,8 +4,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { ViewControls } from './ViewControls';
 import { createShipModel } from '../utils/shipModel';
-import { findPath } from '../utils/pathFinding';
-
+import { findPathHybrid } from '../utils/hybridPath';
 
 const ShipViewer: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -18,7 +17,6 @@ const ShipViewer: React.FC = () => {
   const controlsRef = useRef<OrbitControls | null>(null);
   const shipModelRef = useRef<THREE.Group | null>(null);
 
-  // Export the model as GLB
   const exportGLB = () => {
     if (!sceneRef.current || !shipModelRef.current) return;
     const exporter = new GLTFExporter();
@@ -50,7 +48,14 @@ const ShipViewer: React.FC = () => {
     link.click();
   };
 
-  // Handle equipment selection
+  const nudgeOutOfMesh = (mesh: THREE.Mesh, direction = new THREE.Vector3(1, 0, 0)): THREE.Vector3 => {
+    mesh.geometry.computeBoundingBox();
+    const center = mesh.geometry.boundingBox!.getCenter(new THREE.Vector3());
+    mesh.localToWorld(center);
+    direction.normalize().multiplyScalar(0.6);
+    return center.add(direction);
+  };
+
   const handleClick = (event: MouseEvent) => {
     if (!containerRef.current || !cameraRef.current || !shipModelRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
@@ -65,9 +70,8 @@ const ShipViewer: React.FC = () => {
       const mesh = intersects[0].object as THREE.Mesh;
       if (mesh.userData.system && selectedEquipment.length < 2) {
         setSelectedEquipment(prev => {
-          if (prev.includes(mesh)) return prev; // Prevent selecting the same mesh
+          if (prev.includes(mesh)) return prev;
           const newSelection = [...prev, mesh];
-          // Highlight selected equipment
           mesh.material = (mesh.material as THREE.MeshStandardMaterial).clone();
           (mesh.material as THREE.MeshStandardMaterial).emissive.set(0xffff00);
           (mesh.material as THREE.MeshStandardMaterial).emissiveIntensity = 0.5;
@@ -77,26 +81,32 @@ const ShipViewer: React.FC = () => {
     }
   };
 
-  // Handle route generation
   const handleRoute = () => {
     if (selectedEquipment.length !== 2 || !sceneRef.current || !shipModelRef.current) return;
 
-    // Get bounding box centers of selected equipment
-    selectedEquipment.forEach(mesh => mesh.geometry.computeBoundingBox());
-    const start = selectedEquipment[0].geometry.boundingBox!.getCenter(new THREE.Vector3());
-    selectedEquipment[0].localToWorld(start);
-    const end = selectedEquipment[1].geometry.boundingBox!.getCenter(new THREE.Vector3());
-    selectedEquipment[1].localToWorld(end);
+    // Nudge to avoid center being inside the mesh
+    const start = nudgeOutOfMesh(selectedEquipment[0], new THREE.Vector3(1, 0, 0));
+    const end = nudgeOutOfMesh(selectedEquipment[1], new THREE.Vector3(-1, 0, 0));
 
-    // Find path using A* algorithm
-    const path = findPath(start, end, shipModelRef.current);
+    // Debug: visualize start and end
+    const debugSphere = (pos: THREE.Vector3, color: number) => {
+      const sphereGeom = new THREE.SphereGeometry(0.2, 16, 16);
+      const sphereMat = new THREE.MeshBasicMaterial({ color });
+      const sphere = new THREE.Mesh(sphereGeom, sphereMat);
+      sphere.position.copy(pos);
+      sceneRef.current?.add(sphere);
+    };
+    debugSphere(start, 0x00ff00); // Green = start
+    debugSphere(end, 0xff0000);   // Red = end
 
-    // Remove previous path
+    // Find path
+    const path = findPathHybrid(start, end, shipModelRef.current, 1.0); // you can change step size
+
+
     if (pathLine) {
       sceneRef.current.remove(pathLine);
     }
 
-    // Render new path
     if (path.length > 0) {
       const points = path.map(p => new THREE.Vector3(p.x, p.y, p.z));
       const geometry = new THREE.BufferGeometry().setFromPoints(points);
@@ -106,9 +116,9 @@ const ShipViewer: React.FC = () => {
       setPathLine(line);
     } else {
       alert('No path found between the selected equipment.');
+      console.warn('No path found. Start or end might be blocked.');
     }
 
-    // Reset selection and remove highlights
     selectedEquipment.forEach(mesh => {
       (mesh.material as THREE.MeshStandardMaterial).emissive.set(0x000000);
     });
@@ -118,45 +128,37 @@ const ShipViewer: React.FC = () => {
   useEffect(() => {
     if (!containerRef.current) return;
 
-    // Initialize scene
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x111827);
     sceneRef.current = scene;
 
-    // Initialize camera
     const camera = new THREE.PerspectiveCamera(75, containerRef.current.clientWidth / containerRef.current.clientHeight, 0.1, 1000);
     camera.position.set(5, 5, 15);
     cameraRef.current = camera;
 
-    // Initialize renderer
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(containerRef.current.clientWidth, containerRef.current.clientHeight);
     renderer.setPixelRatio(window.devicePixelRatio);
     containerRef.current.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
-    // Add orbit controls
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controlsRef.current = controls;
 
-    // Add lights
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
     scene.add(ambientLight);
     const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
     directionalLight.position.set(5, 10, 7.5);
     scene.add(directionalLight);
 
-    // Add ship model
     const shipModel = createShipModel();
     scene.add(shipModel);
     shipModelRef.current = shipModel;
 
-    // Add grid helper
     const gridHelper = new THREE.GridHelper(30, 30, 0x555555, 0x333333);
     scene.add(gridHelper);
 
-    // Add water plane
     const waterGeometry = new THREE.PlaneGeometry(100, 100);
     const waterMaterial = new THREE.MeshStandardMaterial({
       color: 0x0066cc,
@@ -169,7 +171,6 @@ const ShipViewer: React.FC = () => {
     waterPlane.position.y = -2;
     scene.add(waterPlane);
 
-    // Animation loop
     const animate = () => {
       requestAnimationFrame(animate);
       controlsRef.current?.update();
@@ -177,7 +178,6 @@ const ShipViewer: React.FC = () => {
     };
     animate();
 
-    // Handle resize
     const handleResize = () => {
       if (!containerRef.current || !cameraRef.current || !rendererRef.current) return;
       const width = containerRef.current.clientWidth;
@@ -188,7 +188,6 @@ const ShipViewer: React.FC = () => {
     };
     window.addEventListener('resize', handleResize);
 
-    // Add click handler for equipment selection
     containerRef.current.addEventListener('click', handleClick);
 
     return () => {
@@ -200,7 +199,6 @@ const ShipViewer: React.FC = () => {
     };
   }, []);
 
-  // Handle system selection
   useEffect(() => {
     if (!shipModelRef.current) return;
     shipModelRef.current.traverse(child => {
